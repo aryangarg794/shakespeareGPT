@@ -1,0 +1,1 @@
+Replication of Andrej Karpathy's [*Let's Build GPT*](https://www.youtube.com/watch?v=kCc8FmEb1nY). Also used this lecture to test out [uv](https://docs.astral.sh/uv/) which was updated wih new features recently.
