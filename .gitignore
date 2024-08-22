@@ -1,2 +1,4 @@
 .venv
 .mypy_cache
+input.txt
+/weights

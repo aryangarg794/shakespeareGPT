@@ -1,58 +1,43 @@
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
-batch_size = 64
-dropout = 0.2
-n_layer = 6
-n_embd = 384
-n_head = 6
+from typing import Self, Callable
+
+
+dropout = 0.3
+n_layer = 8
+n_embd = 512
+n_head = 8
 block_size = 256
-max_iters = 5000
-eval_interval = 500
-learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
 
-torch.manual_seed(1337)
-
+# Open dataset
 with open('input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
+chars: list = sorted(list(set(text)))
+vocab_size: int = len(chars) # number of total characters
 
-stoi = {ch:i for i, ch in enumerate(chars)}
-itos = {i:ch for i, ch in enumerate(chars)}
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join([itos[i] for i in l])
-
-data = torch.tensor(encode(text), dtype=torch.long)
-
-n = int(0.9*len(data))
-train_data = data[:n]
-val_data = data[n:]
-
-def get_batch(split):
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
+stoi: dict = {ch:i for i, ch in enumerate(chars)} # dictionary to convert char to an index
+itos: dict = {i:ch for i, ch in enumerate(chars)} # dictionary to convert index to a char
+encode: Callable[[str], list] = lambda s: [stoi[c] for c in s] # encode an input str
+decode: Callable[[list[int]], str] = lambda l: ''.join([itos[i] for i in l]) # decode input list
 
 class Head(nn.Module):
+    
+    """ Single self attention head """
 
-    def __init__(self, head_size):
+    def __init__(self: Self, head_size: int) -> None:
         super().__init__()
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # used for masked_fill
 
         self.dropout = nn.Dropout(dropout)
     
-    def forward(self, x):
+    def forward(self: Self, x: Tensor) -> Tensor:
         B, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
@@ -67,21 +52,25 @@ class Head(nn.Module):
         return out
 
 class MultiHeadAttention(nn.Module):
+    
+    """ Create multiple heads based on the Head class"""
 
-    def __init__(self, num_heads, head_size):
+    def __init__(self: Self, num_heads: int, head_size: int) -> None:
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.projection = nn.Linear(n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self: Self, x: Tensor) -> Tensor:
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.dropout(self.projection(out))
         return out
 
 class FeedForward(nn.Module):
+    
+    """ Basic MLP network """
 
-    def __init__(self, n_embd):
+    def __init__(self: Self, n_embd: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
@@ -90,12 +79,14 @@ class FeedForward(nn.Module):
             nn.Dropout(dropout)
         )
     
-    def forward(self, x):
+    def forward(self: Self, x: Tensor) -> Tensor:
         return self.net(x)
 
 class Block(nn.Module):
+    
+    """ Single block of self-attention + feedforward"""
 
-    def __init__(self, n_embd, n_head):
+    def __init__(self: Self, n_embd: int, n_head: int) -> None:
         super().__init__()
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
@@ -103,14 +94,16 @@ class Block(nn.Module):
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
-    def forward(self, x):
-        x = x + self.sa(x)
-        x = x + self.ffwd(x)
+    def forward(self: Self, x: Tensor) -> Tensor:
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
         return x
 
-class BigramLanguageModel(nn.Module):
+class GPTModel(nn.Module):
+    
+    """ GPT model """
 
-    def __init__(self):
+    def __init__(self: Self, device: str) -> None:
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
@@ -119,13 +112,25 @@ class BigramLanguageModel(nn.Module):
         )
         self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.device = device
+
+        self.apply(self._kaiming_init)
+
+    # use kaiming init for linear layers and normal for embedding layers
+    def _kaiming_init(self: Self, m: nn.Module) -> None:
+        if isinstance(m, (nn.Linear)):
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Embedding):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
 
-    def forward(self, idx, targets=None):
+    def forward(self: Self, idx: Tensor, targets: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         B, T = idx.shape
 
         tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        pos_emb = self.position_embedding_table(torch.arange(T, device=self.device))
         x = tok_emb + pos_emb
         x = self.blocks(x)
         x = self.ln_f(x)
@@ -141,7 +146,8 @@ class BigramLanguageModel(nn.Module):
 
         return logits, loss
     
-    def generate(self, idx, max_new_tokens):
+    # generate characters based on the trained model 
+    def generate(self: Self, idx: Tensor, max_new_tokens: int) -> None:
         for _ in range(max_new_tokens):
 
             idx_cond = idx[:, -block_size:]
@@ -149,41 +155,6 @@ class BigramLanguageModel(nn.Module):
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
+            print(decode(idx_next.tolist()[0]), end='', flush=True)
             idx = torch.cat((idx, idx_next), dim=1)
-        return idx
-    
-
-model = BigramLanguageModel()
-m = model.to(device)
-
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-
-for iter in range(max_iters):
-
-    if iter % eval_interval == eval_interval-1:
-        losses = estimate_loss()
-        print(f'step {iter+1}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}')
-
-    xb, yb = get_batch('train')
-
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-
-context = torch.zeros((1, 1), dtype=torch.long)
-print(decode(model.generate(context, max_new_tokens=300)[0].tolist()))
+        
